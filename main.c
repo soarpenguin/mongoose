@@ -33,6 +33,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <ctype.h> // for isblank
 
 #include "mongoose.h"
 
@@ -187,10 +188,16 @@ static void process_command_line_arguments(char *argv[], char **options) {
     // Loop over the lines in config file
     while (fgets(line, sizeof(line), fp) != NULL) {
 
+	  int i = 0;
       line_no++;
 
+	  // improve parse config file, use isblank skip the blank space
+	  // solve only have blank space line cause parse error
+	  while(isblank(line[i]))
+		++i;
+
       // Ignore empty lines and comments
-      if (line[0] == '#' || line[0] == '\n')
+      if (line[i] == '#' || line[i] == '\n' || line[i] == '\r')
         continue;
 
       if (sscanf(line, "%s %[^\r\n#]", opt, val) != 2) {
@@ -481,7 +488,7 @@ int main(int argc, char *argv[]) {
   while (exit_flag == 0) {
     sleep(1);
   }
-  printf("Exiting on signal %d, waiting for all threads to finish...",
+  printf("Exiting on signal %d, waiting for all threads to finish...\n",
          exit_flag);
   fflush(stdout);
   mg_stop(ctx);
