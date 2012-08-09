@@ -169,6 +169,11 @@ typedef struct DIR {
 } DIR;
 
 #else    // UNIX  specific
+#if defined(USE_EPOLL)
+#include <sys/epoll.h>
+#define MAXEVENTS 64
+static int make_socket_non_blocking(int sfd);
+#endif
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -456,6 +461,7 @@ struct mg_context {
   void *user_data;              // User-defined data
 
   struct socket *listening_sockets;
+  int socksize;					// number of socket listening
 
   volatile int num_threads;  // Number of threads
   pthread_mutex_t mutex;     // Protects (max|num)_threads
@@ -3496,6 +3502,7 @@ static int set_ports_option(struct mg_context *ctx) {
   SOCKET sock;
   struct vec vec;
   struct socket so, *listener;
+  int size; //count the number of listenning socket
 
   while (success && (list = next_option(list, &vec, NULL)) != NULL) {
     if (!parse_port_string(&vec, &so)) {
@@ -3537,6 +3544,11 @@ static int set_ports_option(struct mg_context *ctx) {
     } else {
       *listener = so;
       listener->sock = sock;
+#if defined(USE_EPOLL)
+	  // make socket no blocking
+	  make_socket_non_blocking(sock);
+#endif
+	  size++; // a socket is success for listenning
       set_close_on_exec(listener->sock);
       listener->next = ctx->listening_sockets;
       ctx->listening_sockets = listener;
@@ -3547,6 +3559,7 @@ static int set_ports_option(struct mg_context *ctx) {
     close_all_listening_sockets(ctx);
   }
 
+  ctx->socksize = size; // set the number of socket
   return success;
 }
 
@@ -3645,12 +3658,37 @@ static int check_acl(struct mg_context *ctx, const union usa *usa) {
   return allowed == '+';
 }
 
+#if defined(USE_EPOLL)
+// make the socket nonblocking
+static int make_socket_non_blocking (int sfd) {
+  int flags, s;
+
+  flags = fcntl (sfd, F_GETFL, 0);
+  if (flags == -1)
+  {
+	DEBUG_TRACE (("fcntl error"));
+	return -1;
+  }
+
+  flags |= O_NONBLOCK;
+  s = fcntl (sfd, F_SETFL, flags);
+  if (s == -1)
+  {
+	DEBUG_TRACE (("fcntl error"));
+	return -1;
+ }
+
+	return 0;
+}
+#else
+// add fd to fd_set when use the select
 static void add_to_set(SOCKET fd, fd_set *set, int *max_fd) {
   FD_SET(fd, set);
   if (fd > (SOCKET) *max_fd) {
     *max_fd = (int) fd;
   }
 }
+#endif
 
 #if !defined(_WIN32)
 static int set_uid_option(struct mg_context *ctx) {
@@ -4170,10 +4208,18 @@ static void accept_new_connection(const struct socket *listener,
 }
 
 static void master_thread(struct mg_context *ctx) {
+#if defined(USE_EPOLL)
+  struct epoll_event event;
+  struct epoll_event *events = NULL;
+  int *sockets;
+  int efd = 0;
+  int i = 0, s, n;
+#else
   fd_set read_set;
   struct timeval tv;
-  struct socket *sp;
   int max_fd;
+#endif
+  struct socket *sp;
 
   // Increase priority of the master thread
 #if defined(_WIN32)
@@ -4186,6 +4232,68 @@ static void master_thread(struct mg_context *ctx) {
   pthread_setschedparam(pthread_self(), SCHED_RR, &sched_param);
 #endif
 
+#if defined(USE_EPOLL)
+  // TODO change select to epoll
+
+  sockets = calloc(ctx->socksize, sizeof(int));
+  if(NULL == sockets)
+    goto bad;
+
+  efd = epoll_create1(0);
+  if(efd == -1)
+    goto bad;
+
+  i = 0;
+  for (sp = ctx->listening_sockets; sp != NULL; sp = sp->next) {
+    sockets[i] = sp->sock;
+    event.data.fd = sockets[i];
+    //event.events = EPOLLIN | EPOLLET;
+    event.events = EPOLLIN;
+    s = epoll_ctl(efd, EPOLL_CTL_ADD, sockets[i], &event);
+    if(-1 == s)
+      goto bad;
+    i++;
+  }
+  
+  events = calloc(MAXEVENTS, sizeof(struct epoll_event));
+  if(NULL == events)
+    goto bad;
+
+  while (ctx->stop_flag == 0) {
+    n = epoll_wait(efd, events, MAXEVENTS, 100);
+    if(n <= 0)
+	  continue;
+    
+    for(i = 0; i < n; i++) {
+      if ((events[i].events & EPOLLERR) ||
+    		(events[i].events & EPOLLHUP) ||
+    		(!(events[i].events & EPOLLIN))) 
+      {
+    	/* An error has occured on this fd, or the socket is not
+    	   ready for reading (why were we notified then?) */
+    	DEBUG_TRACE(("error in epoll_wait\n"));
+		close (events[i].data.fd);
+    	continue;
+      }
+      else {
+    	for(sp = ctx->listening_sockets; sp != NULL; sp = sp->next) 
+    	  if(ctx->stop_flag == 0 && sp->sock == events[i].data.fd)
+    		accept_new_connection(sp, ctx);
+		  else
+	    	produce_socket(ctx, sp);
+      }
+    }
+  }
+  
+//label for error in prepare epoll 
+bad:
+  if(events != NULL)
+    free(events);
+  if(sockets != NULL)
+    free(sockets);
+  if(efd != -1)
+    close(efd);
+#else
   while (ctx->stop_flag == 0) {
     FD_ZERO(&read_set);
     max_fd = -1;
@@ -4213,6 +4321,7 @@ static void master_thread(struct mg_context *ctx) {
       }
     }
   }
+#endif
   DEBUG_TRACE(("stopping workers"));
 
   // Stop signal received: somebody called mg_stop. Quit.
