@@ -461,7 +461,6 @@ struct mg_context {
   void *user_data;              // User-defined data
 
   struct socket *listening_sockets;
-  int socksize;					// number of socket listening
 
   volatile int num_threads;  // Number of threads
   pthread_mutex_t mutex;     // Protects (max|num)_threads
@@ -3502,7 +3501,6 @@ static int set_ports_option(struct mg_context *ctx) {
   SOCKET sock;
   struct vec vec;
   struct socket so, *listener;
-  int size; //count the number of listenning socket
 
   while (success && (list = next_option(list, &vec, NULL)) != NULL) {
     if (!parse_port_string(&vec, &so)) {
@@ -3548,7 +3546,6 @@ static int set_ports_option(struct mg_context *ctx) {
 	  // make socket no blocking
 	  make_socket_non_blocking(sock);
 #endif
-	  size++; // a socket is success for listenning
       set_close_on_exec(listener->sock);
       listener->next = ctx->listening_sockets;
       ctx->listening_sockets = listener;
@@ -3559,7 +3556,6 @@ static int set_ports_option(struct mg_context *ctx) {
     close_all_listening_sockets(ctx);
   }
 
-  ctx->socksize = size; // set the number of socket
   return success;
 }
 
@@ -4211,7 +4207,6 @@ static void master_thread(struct mg_context *ctx) {
 #if defined(USE_EPOLL)
   struct epoll_event event;
   struct epoll_event *events = NULL;
-  int *sockets;
   int efd = 0;
   int i = 0, s, n;
 #else
@@ -4234,25 +4229,17 @@ static void master_thread(struct mg_context *ctx) {
 
 #if defined(USE_EPOLL)
   // TODO change select to epoll
-
-  sockets = calloc(ctx->socksize, sizeof(int));
-  if(NULL == sockets)
-    goto bad;
-
   efd = epoll_create1(0);
   if(efd == -1)
     goto bad;
 
-  i = 0;
   for (sp = ctx->listening_sockets; sp != NULL; sp = sp->next) {
-    sockets[i] = sp->sock;
-    event.data.fd = sockets[i];
+    event.data.fd = sp->sock;
     //event.events = EPOLLIN | EPOLLET;
     event.events = EPOLLIN;
-    s = epoll_ctl(efd, EPOLL_CTL_ADD, sockets[i], &event);
+    s = epoll_ctl(efd, EPOLL_CTL_ADD, sp->sock, &event);
     if(-1 == s)
       goto bad;
-    i++;
   }
   
   events = calloc(MAXEVENTS, sizeof(struct epoll_event));
@@ -4289,8 +4276,6 @@ static void master_thread(struct mg_context *ctx) {
 bad:
   if(events != NULL)
     free(events);
-  if(sockets != NULL)
-    free(sockets);
   if(efd != -1)
     close(efd);
 #else
