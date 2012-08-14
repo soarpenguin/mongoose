@@ -27,6 +27,10 @@
 extern "C" {
 #endif // __cplusplus
 
+#ifndef __GNUC__
+# define __attribute__(x)
+#endif
+
 struct mg_context;     // Handle for the HTTP service itself
 struct mg_connection;  // Handle for the individual connection
 
@@ -166,10 +170,7 @@ int mg_write(struct mg_connection *, const void *buf, size_t len);
 // (8 Kb by default) as temporary message storage for formatting. Do not
 // print data that is bigger than that, otherwise it will be truncated.
 int mg_printf(struct mg_connection *, const char *fmt, ...)
-#ifdef __GNUC__
-__attribute__((format(printf, 2, 3)))
-#endif
-;
+__attribute__((format(printf, 2, 3)));
 
 
 // Send contents of the entire file together with HTTP headers.
